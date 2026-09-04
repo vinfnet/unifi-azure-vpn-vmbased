@@ -1,0 +1,4 @@
+.ssh/
+udm-wireguard.conf
+.env
+*.local
