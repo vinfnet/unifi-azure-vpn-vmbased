@@ -18,7 +18,13 @@ if [[ ! -f /swapfile ]]; then
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
 fi
 apt-get update -qq
-apt-get install -y -qq wireguard iptables
+apt-get install -y -qq wireguard iptables unattended-upgrades
+
+cat >/etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
 
 install -d -m 700 /etc/wireguard
 umask 077
