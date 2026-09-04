@@ -2,6 +2,21 @@
 
 Deploy a low-cost Ubuntu VM as a WireGuard gateway between a UniFi gateway and an Azure virtual network. The scripts create the resource group, VNet, subnet, NSG, static public IP, NIC, and VM; install WireGuard; and generate an importable UniFi VPN Client profile.
 
+## Why this is useful
+
+This provides private, routed access from a UniFi LAN to workloads in Azure without the cost and complexity of an Azure VPN Gateway. It is useful for labs, development environments, temporary migrations, administration, and small networks where a lightweight VM-based endpoint is sufficient. The Ubuntu VM itself is also an immediate private ping target, making end-to-end validation straightforward before other Azure workloads are added.
+
+The design works when the UniFi gateway is behind **carrier-grade NAT (CGNAT)**, ordinary ISP NAT, or a connection without a fixed public IP. The Azure VM has the static public endpoint, while the UniFi gateway initiates the WireGuard session outbound. Therefore:
+
+- No inbound port forwarding or public IPv4 address is required on the UniFi side.
+- CGNAT does not prevent tunnel establishment because return packets use the outbound NAT state created by the UniFi gateway.
+- `PersistentKeepalive = 25` keeps that NAT mapping active and helps re-establish it after an address or path change.
+- WireGuard endpoint roaming lets Azure learn the most recent public source IP and UDP port used by the UniFi peer.
+
+It also works with **multiple Internet connections** on the UniFi gateway. The WireGuard client follows the gateway's normal WAN selection and does not need to be bound to a specific WAN interface. In failover mode, UniFi moves outbound traffic to the surviving connection; WireGuard then sends from the new NAT/public endpoint, which Azure learns automatically. The tunnel interruption is normally limited to WAN failure detection and a new handshake, and no Azure configuration change is required. This makes WAN failover transparent to the routed Azure networks.
+
+In load-balancing mode, UniFi normally keeps the WireGuard UDP flow on the WAN selected by its connection-hashing logic. If that WAN fails, the connection can re-establish through another healthy WAN. The Azure NSG deliberately accepts UDP 51820 from any Internet source so both CGNAT address changes and multi-WAN failover can work; WireGuard keys, rather than the peer's public source IP, authenticate the UniFi gateway.
+
 ## Default topology
 
 The defaults are examples and can be overridden with environment variables.
@@ -116,7 +131,7 @@ The WireGuard client normally follows the gateway's WAN routing:
 - In load-balancing mode connection hashing selects a WAN and preserves session stickiness.
 - The Azure NSG accepts WireGuard from any Internet source, and WireGuard learns the peer's latest endpoint, so either WAN works.
 
-`PersistentKeepalive = 25` helps the tunnel recover after NAT changes or WAN failover. Do not route the Azure WireGuard server's public endpoint through the WireGuard client itself.
+There is no need to bind the VPN Client to WAN1 or WAN2. `PersistentKeepalive = 25` helps the tunnel recover after CGNAT mapping, public-address, or WAN changes. Do not route the Azure WireGuard server's public endpoint through the WireGuard client itself.
 
 ## Test and troubleshoot
 
