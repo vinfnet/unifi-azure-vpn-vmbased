@@ -17,6 +17,29 @@ It also works with **multiple Internet connections** on the UniFi gateway. The W
 
 In load-balancing mode, UniFi normally keeps the WireGuard UDP flow on the WAN selected by its connection-hashing logic. If that WAN fails, the connection can re-establish through another healthy WAN. The Azure NSG deliberately accepts UDP 51820 from any Internet source so both CGNAT address changes and multi-WAN failover can work; WireGuard keys, rather than the peer's public source IP, authenticate the UniFi gateway.
 
+## Example network connectivity
+
+```mermaid
+flowchart LR
+   LAN["UniFi LAN<br/>192.168.10.0/24"] --> UDM["UniFi UDM<br/>WireGuard client"]
+
+   UDM -->|"Primary or load-balanced"| WAN1["WAN1<br/>ISP address behind CGNAT"]
+   WAN1 --> CGNAT["ISP CGNAT gateway<br/>Shared, changing public IP"]
+   CGNAT --> INTERNET((Internet))
+
+   UDM -->|"Failover or load-balanced"| WAN2["WAN2<br/>Public IP: 198.51.100.10"]
+   WAN2 --> INTERNET
+
+   INTERNET --> PIP["Azure static public IP<br/>203.0.113.20:51820/UDP"]
+   PIP --> NSG["Azure NSG<br/>Allow UDP 51820"]
+   NSG --> VM["Ubuntu WireGuard VM<br/>WG: 172.31.254.1<br/>VNet: 10.240.20.4"]
+   VM --> VNET["Azure VNet workloads<br/>10.240.20.0/24"]
+
+   UDM -. "Outbound WireGuard tunnel<br/>uses whichever WAN is active" .-> VM
+```
+
+The example addresses `198.51.100.10` and `203.0.113.20` are documentation-only public addresses. The UDM always initiates the tunnel outbound. When WAN1 is active, the ISP's CGNAT gateway translates the WireGuard flow; when WAN2 is active, the flow uses its public IP directly. After failover, WireGuard endpoint roaming updates the UniFi peer's observed source address on the Azure VM without changing the VPN configuration or binding it to either WAN.
+
 ## Default topology
 
 The defaults are examples and can be overridden with environment variables.
