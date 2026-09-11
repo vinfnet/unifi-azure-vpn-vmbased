@@ -6,7 +6,11 @@ Deploy a low-cost Ubuntu VM as a WireGuard gateway between a UniFi gateway and a
 
 This provides private, routed access from a UniFi LAN to workloads in Azure without the cost and complexity of an Azure VPN Gateway. It is useful for labs, development environments, temporary migrations, administration, and small networks where a lightweight VM-based endpoint is sufficient. The Ubuntu VM itself is also an immediate private ping target, making end-to-end validation straightforward before other Azure workloads are added.
 
-The design works when the UniFi gateway is behind **carrier-grade NAT (CGNAT)**, ordinary ISP NAT, or a connection without a fixed public IP. The Azure VM has the static public endpoint, while the UniFi gateway initiates the WireGuard session outbound. Therefore:
+The design works when the UniFi gateway is behind **carrier-grade NAT (CGNAT)**, ordinary ISP NAT, or a connection without a fixed public IP. CGNAT means the ISP shares one public IPv4 address among multiple customers and gives the customer router a private address inside the ISP network. The customer therefore cannot accept unsolicited inbound Internet connections or configure port forwarding on the ISP's outer NAT device.
+
+This rules out the conventional site-to-site IPsec design used here, which expects the home VPN endpoint to have a directly reachable and stable public IP address. Even without CGNAT, a public address assigned by DHCP may change and make an IP-based peer definition unreliable. Some IPsec products can traverse NAT or use dynamic peers, but that requires compatible features and does not provide a public address controlled by the customer.
+
+The Azure VM instead has the static public endpoint, while the UniFi gateway initiates the WireGuard session outbound. Therefore:
 
 - No inbound port forwarding or public IPv4 address is required on the UniFi side.
 - CGNAT does not prevent tunnel establishment because return packets use the outbound NAT state created by the UniFi gateway.
