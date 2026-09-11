@@ -9,6 +9,7 @@ VNET_CIDR="${VNET_CIDR:-10.240.20.0/24}"
 SUBNET_CIDR="${SUBNET_CIDR:-10.240.20.0/27}"
 VM_PRIVATE_IP="${VM_PRIVATE_IP:-10.240.20.4}"
 LAN_CIDR="${LAN_CIDR:-}"
+WIREGUARD_SOURCE_CIDRS="${WIREGUARD_SOURCE_CIDRS:-}"
 WG_CIDR="${WG_CIDR:-172.31.254.0/30}"
 WG_SERVER_IP="${WG_SERVER_IP:-172.31.254.1}"
 WG_UDM_IP="${WG_UDM_IP:-172.31.254.2}"
@@ -25,6 +26,16 @@ NSG_NAME="${RESOURCE_PREFIX}-nsg"
 PIP_NAME="${RESOURCE_PREFIX}-pip"
 NIC_NAME="${RESOURCE_PREFIX}-nic"
 VM_NAME="${RESOURCE_PREFIX}-vm"
+TEMPORARY_SSH_RULE_CREATED=false
+
+remove_temporary_ssh_rule() {
+    if [[ "$TEMPORARY_SSH_RULE_CREATED" == true ]]; then
+        echo "Removing temporary public SSH access..."
+        az network nsg rule delete --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" \
+            --name AllowTemporaryBootstrapSsh --output none || true
+        TEMPORARY_SSH_RULE_CREATED=false
+    fi
+}
 
 prompt_required() {
     local variable_name="$1" description="$2" example="$3" current_value
@@ -49,6 +60,20 @@ prompt_required SUBSCRIPTION_ID \
 prompt_required LAN_CIDR \
     "Enter the private CIDR of the LAN behind the UniFi gateway. Azure will route replies for this network through WireGuard." \
     "192.168.10.0/24"
+prompt_required WIREGUARD_SOURCE_CIDRS \
+    "Enter space-separated public ISP CIDRs allowed to reach WireGuard. Include the egress ranges for every WAN used for failover." \
+    "198.51.100.0/24 203.0.113.0/24"
+read -r -a WIREGUARD_SOURCE_PREFIXES <<<"$WIREGUARD_SOURCE_CIDRS"
+
+for source_prefix in "${WIREGUARD_SOURCE_PREFIXES[@]}"; do
+    case "$source_prefix" in
+        Internet|'*'|0.0.0.0/0)
+            echo "Refusing unrestricted WireGuard source: $source_prefix" >&2
+            echo "Use the narrowest practical public CIDR ranges for your ISP connections." >&2
+            exit 1
+            ;;
+    esac
+done
 
 for command_name in az ssh ssh-keygen scp curl; do
     command -v "$command_name" >/dev/null 2>&1 || {
@@ -139,10 +164,13 @@ az network nsg create --resource-group "$RESOURCE_GROUP" --name "$NSG_NAME" \
     --location "$LOCATION" >/dev/null
 az network nsg rule create --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" \
     --name AllowWireGuard --priority 100 --access Allow --direction Inbound \
-    --protocol Udp --source-address-prefixes Internet --destination-port-ranges "$WG_PORT" >/dev/null
+    --protocol Udp --source-address-prefixes "${WIREGUARD_SOURCE_PREFIXES[@]}" \
+    --destination-port-ranges "$WG_PORT" >/dev/null
 az network nsg rule create --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" \
-    --name AllowSshFromAdmin --priority 110 --access Allow --direction Inbound \
+    --name AllowTemporaryBootstrapSsh --priority 110 --access Allow --direction Inbound \
     --protocol Tcp --source-address-prefixes "$ADMIN_CIDR" --destination-port-ranges 22 >/dev/null
+TEMPORARY_SSH_RULE_CREATED=true
+trap remove_temporary_ssh_rule EXIT
 az network nsg rule create --resource-group "$RESOURCE_GROUP" --nsg-name "$NSG_NAME" \
     --name AllowUnifiLan --priority 120 --access Allow --direction Inbound \
     --protocol '*' --source-address-prefixes "$LAN_CIDR" --destination-address-prefixes "$VNET_CIDR" >/dev/null
@@ -181,7 +209,11 @@ ssh "${SSH_OPTIONS[@]}" "$ADMIN_USER@$PUBLIC_IP" \
     "sudo bash /tmp/configure-wireguard.sh '$PUBLIC_IP' '$VNET_CIDR' '$LAN_CIDR' '$WG_SERVER_IP' '$WG_UDM_IP' '$WG_PORT' '$ADMIN_USER'"
 scp "${SSH_OPTIONS[@]}" "$ADMIN_USER@$PUBLIC_IP:/home/$ADMIN_USER/udm-wireguard.conf" "$UDM_CONFIG_PATH"
 chmod 600 "$UDM_CONFIG_PATH"
-ssh "${SSH_OPTIONS[@]}" "$ADMIN_USER@$PUBLIC_IP" "rm -f /home/$ADMIN_USER/udm-wireguard.conf"
+ssh "${SSH_OPTIONS[@]}" "$ADMIN_USER@$PUBLIC_IP" \
+    "rm -f /home/$ADMIN_USER/udm-wireguard.conf /tmp/configure-wireguard.sh"
+
+remove_temporary_ssh_rule
+trap - EXIT
 
 cat <<EOF
 
@@ -191,7 +223,8 @@ Deployment complete.
   Ping target:          $VM_PRIVATE_IP
   WireGuard endpoint:   $PUBLIC_IP:$WG_PORT
   UniFi configuration: $UDM_CONFIG_PATH
-  SSH:                  ssh -i '$SSH_KEY_PATH' $ADMIN_USER@$PUBLIC_IP
+    SSH after VPN setup:  ssh -i '$SSH_KEY_PATH' $ADMIN_USER@$WG_SERVER_IP
 
 The UniFi configuration contains a private key. Keep it secret and follow README.md.
+Public SSH is disabled. If VPN recovery is not possible, redeploy the appliance.
 EOF

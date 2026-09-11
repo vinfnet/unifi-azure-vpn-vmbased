@@ -13,32 +13,45 @@ The design works when the UniFi gateway is behind **carrier-grade NAT (CGNAT)**,
 - `PersistentKeepalive = 25` keeps that NAT mapping active and helps re-establish it after an address or path change.
 - WireGuard endpoint roaming lets Azure learn the most recent public source IP and UDP port used by the UniFi peer.
 
-It also works with **multiple Internet connections** on the UniFi gateway. The WireGuard client follows the gateway's normal WAN selection and does not need to be bound to a specific WAN interface. In failover mode, UniFi moves outbound traffic to the surviving connection; WireGuard then sends from the new NAT/public endpoint, which Azure learns automatically. The tunnel interruption is normally limited to WAN failure detection and a new handshake, and no Azure configuration change is required. This makes WAN failover transparent to the routed Azure networks.
+It also works with **multiple Internet connections** on the UniFi gateway. The WireGuard client follows the gateway's normal WAN selection and does not need to be bound to a specific WAN interface. In failover mode, UniFi moves outbound traffic to the surviving connection; WireGuard then sends from the new NAT/public endpoint, which Azure learns automatically.
 
-In load-balancing mode, UniFi normally keeps the WireGuard UDP flow on the WAN selected by its connection-hashing logic. If that WAN fails, the connection can re-establish through another healthy WAN. The Azure NSG deliberately accepts UDP 51820 from any Internet source so both CGNAT address changes and multi-WAN failover can work; WireGuard keys, rather than the peer's public source IP, authenticate the UniFi gateway.
+The Azure NSG restricts UDP 51820 to public source networks supplied at deployment. Include a suitable ISP egress range for every WAN. A `/32` is ideal for a static address, but it can lock out a connection using DHCP or CGNAT when its public address changes. For a dynamic service, use the narrowest stable public range your ISP confirms it may assign. This is broader than one address but substantially safer than exposing the port to the entire Internet.
 
 ## Example network connectivity
 
 ```mermaid
 flowchart LR
-   LAN["UniFi LAN<br/>192.168.10.0/24"] --> UDM["UniFi UDM<br/>WireGuard client"]
+   CLIENTS["Private LAN clients"] --> UNIFI["UniFi gateway<br/>WireGuard client"]
+   UNIFI -->|"Preferred path"| PRIMARY["Primary ISP<br/>DHCP or CGNAT"]
+   UNIFI -->|"Standby path"| SECONDARY["Secondary ISP<br/>DHCP or CGNAT"]
+   PRIMARY --> INTERNET((Internet))
+   SECONDARY --> INTERNET
+   INTERNET --> PUBLIC["Azure static endpoint<br/>UDP 51820"]
+   PUBLIC --> NSG["Network Security Group<br/>ISP source ranges only"]
+   NSG --> WG["Ubuntu WireGuard appliance"]
+   WG --> VNET["Private Azure workloads"]
 
-   UDM -->|"Primary or load-balanced"| WAN1["WAN1<br/>ISP address behind CGNAT"]
-   WAN1 --> CGNAT["ISP CGNAT gateway<br/>Shared, changing public IP"]
-   CGNAT --> INTERNET((Internet))
-
-   UDM -->|"Failover or load-balanced"| WAN2["WAN2<br/>Public IP: 198.51.100.10"]
-   WAN2 --> INTERNET
-
-   INTERNET --> PIP["Azure static public IP<br/>203.0.113.20:51820/UDP"]
-   PIP --> NSG["Azure NSG<br/>Allow UDP 51820"]
-   NSG --> VM["Ubuntu WireGuard VM<br/>WG: 172.31.254.1<br/>VNet: 10.240.20.4"]
-   VM --> VNET["Azure VNet workloads<br/>10.240.20.0/24"]
-
-   UDM -. "Outbound WireGuard tunnel<br/>uses whichever WAN is active" .-> VM
+   UNIFI -. "Outbound tunnel follows active WAN" .-> WG
 ```
 
-The example addresses `198.51.100.10` and `203.0.113.20` are documentation-only public addresses. The UDM always initiates the tunnel outbound. When WAN1 is active, the ISP's CGNAT gateway translates the WireGuard flow; when WAN2 is active, the flow uses its public IP directly. After failover, WireGuard endpoint roaming updates the UniFi peer's observed source address on the Azure VM without changing the VPN configuration or binding it to either WAN.
+The UniFi gateway always initiates the tunnel outbound. CGNAT therefore does not require inbound forwarding at home. After failover, WireGuard endpoint roaming updates the peer's observed source address on the Azure VM without changing the VPN profile.
+
+```mermaid
+sequenceDiagram
+   participant Client as LAN client
+   participant UniFi as UniFi gateway
+   participant WAN1 as Primary WAN
+   participant WAN2 as Secondary WAN
+   participant Azure as Azure WireGuard VM
+
+   Client->>Azure: Ping over WireGuard via WAN1
+   WAN1--xUniFi: Primary connection fails
+   Client-xAzure: A few pings may time out
+   UniFi->>WAN2: Select healthy backup WAN
+   UniFi->>Azure: New handshake via WAN2
+   Azure->>Azure: Learn the peer's new endpoint
+   Client->>Azure: Ping resumes over WireGuard
+```
 
 ## Default topology
 
@@ -64,8 +77,9 @@ The deployment checks the proposed Azure and WireGuard prefixes against every VN
 
 ## Security
 
-- UDP 51820 is exposed for WireGuard.
-- SSH is limited to the deployer's detected public `/32`, or `ADMIN_CIDR` when supplied.
+- UDP 51820 is limited to the ISP source networks supplied in `WIREGUARD_SOURCE_CIDRS`.
+- Public SSH is opened only to the deployer's detected `/32` during bootstrap and removed automatically when deployment completes.
+- After the VPN is configured, SSH is available only through the WireGuard address.
 - SSH uses a generated Ed25519 key rather than passwords.
 - The generated UniFi private key is downloaded into `udm-wireguard.conf`, removed from the VM, and stored locally with mode 600.
 - Generated keys and configuration are excluded by `.gitignore`.
@@ -94,18 +108,22 @@ Run the deployment script:
 ./deploy.sh
 ```
 
-It prompts, with descriptions and examples, for the two required values:
+It prompts, with descriptions and examples, for three required values:
 
 - `SUBSCRIPTION_ID`: the Azure subscription UUID where resources will be created.
 - `LAN_CIDR`: the private LAN behind the UniFi gateway that must reach Azure.
+- `WIREGUARD_SOURCE_CIDRS`: space-separated public ISP ranges allowed to reach UDP 51820. Include every WAN used for failover.
 
-Alternatively, provide both as environment variables for unattended deployment:
+Alternatively, provide all three as environment variables for unattended deployment:
 
 ```shell
 SUBSCRIPTION_ID="00000000-0000-0000-0000-000000000000" \
 LAN_CIDR="192.168.10.0/24" \
+WIREGUARD_SOURCE_CIDRS="198.51.100.0/24 203.0.113.0/24" \
 ./deploy.sh
 ```
+
+The public ranges above are documentation-only examples. Ask each ISP which public egress range can be used by your connection. With a static address, use its `/32`. With DHCP or CGNAT, prefer the smallest stable ISP range that covers address changes. The deployment refuses `Internet`, `*`, and `0.0.0.0/0`.
 
 If Azure CLI is not authenticated, the script invokes `az login`. It refuses to alter an existing resource group.
 
@@ -119,7 +137,7 @@ VNET_CIDR="10.241.0.0/24" \
 SUBNET_CIDR="10.241.0.0/27" \
 VM_PRIVATE_IP="10.241.0.4" \
 LAN_CIDR="192.168.50.0/24" \
-ADMIN_CIDR="203.0.113.10/32" \
+WIREGUARD_SOURCE_CIDRS="198.51.100.0/24 203.0.113.0/24" \
 ./deploy.sh
 ```
 
@@ -152,9 +170,31 @@ The WireGuard client normally follows the gateway's WAN routing:
 
 - In failover mode it uses the primary WAN and re-establishes through the backup after failure.
 - In load-balancing mode connection hashing selects a WAN and preserves session stickiness.
-- The Azure NSG accepts WireGuard from any Internet source, and WireGuard learns the peer's latest endpoint, so either WAN works.
+- The Azure NSG must contain the possible public egress range for each WAN.
+- WireGuard learns the peer's latest endpoint, so the profile does not contain separate primary and secondary peer addresses.
 
 There is no need to bind the VPN Client to WAN1 or WAN2. `PersistentKeepalive = 25` helps the tunnel recover after CGNAT mapping, public-address, or WAN changes. Do not route the Azure WireGuard server's public endpoint through the WireGuard client itself.
+
+### Test failover
+
+1. Start a continuous ping from a LAN client to `VM_PRIVATE_IP`.
+2. Confirm the ping is using the VPN and that `sudo wg show` on Azure reports a recent handshake.
+3. Disable the primary WAN in UniFi or unplug its Internet connection. Do not disconnect the LAN side of the gateway.
+4. Watch UniFi select the secondary WAN. A working setup commonly loses only a few pings while WAN failure is detected and WireGuard performs a new handshake; exact timing depends on UniFi health checks and both ISPs.
+5. Confirm pings resume and `sudo wg show` reports a new peer endpoint and increasing transfer counters.
+6. Restore the primary WAN and repeat the observations during recovery.
+
+If failover does not recover, confirm the secondary ISP's current public address falls within `WIREGUARD_SOURCE_CIDRS` and that it permits outbound UDP 51820.
+
+### VPN-only SSH
+
+After importing the profile and enabling the policy route, connect to the appliance through its WireGuard address:
+
+```shell
+ssh -i .ssh/unifi-azure-vpn azureadmin@172.31.254.1
+```
+
+TCP 22 is not allowed on the Azure public interface after deployment. Azure Run Command can provide temporary diagnostics without opening SSH. This project intentionally favors a disposable appliance: if VPN recovery fails completely, delete the resource group and redeploy instead of leaving a permanent public management port.
 
 ## Test and troubleshoot
 
