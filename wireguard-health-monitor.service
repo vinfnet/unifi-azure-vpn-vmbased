@@ -1,0 +1,7 @@
+[Unit]
+Description=Check WireGuard tunnel health
+After=wg-quick@wg0.service rsyslog.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wireguard-health-monitor

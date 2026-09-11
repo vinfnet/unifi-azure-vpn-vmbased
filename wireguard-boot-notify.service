@@ -1,0 +1,12 @@
+[Unit]
+Description=Log WireGuard server boot completion
+After=network-online.target rsyslog.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c '/usr/bin/logger --tag wireguard-reboot --priority daemon.warning "WIREGUARD_SERVER_REBOOTED boot_id=$(cat /proc/sys/kernel/random/boot_id) uptime_seconds=$(cut -d. -f1 /proc/uptime)"'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

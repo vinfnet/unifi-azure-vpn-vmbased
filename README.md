@@ -1,6 +1,6 @@
 # VM-based UniFi-to-Azure WireGuard VPN
 
-Deploy a low-cost Ubuntu VM as a WireGuard gateway between a UniFi gateway and an Azure virtual network. The scripts create the resource group, VNet, subnet, NSG, static public IP, NIC, and VM; install WireGuard; and generate an importable UniFi VPN Client profile.
+Deploy a low-cost Ubuntu VM as a WireGuard gateway between a UniFi gateway and an Azure virtual network. The scripts create the resource group, VNet, subnet, NSG, static public IP, NIC, and VM; install WireGuard; generate an importable UniFi VPN Client profile; and optionally configure Azure Monitor email alerts.
 
 ## Why this is useful
 
@@ -93,6 +93,7 @@ Never publish `udm-wireguard.conf` or the `.ssh` directory.
 ## Prerequisites
 
 - An Azure subscription and permission to create resource groups, networking, and VMs
+- Permission to create Azure Monitor resources if alerts are required
 - Azure CLI (`az`)
 - OpenSSH (`ssh`, `scp`, and `ssh-keygen`)
 - `curl`
@@ -103,7 +104,7 @@ Never publish `udm-wireguard.conf` or the `.ssh` directory.
 Make the scripts executable:
 
 ```shell
-chmod +x deploy.sh configure-wireguard.sh destroy.sh
+chmod +x deploy.sh configure-wireguard.sh destroy.sh setup-alerting.sh setup-log-alerts.sh
 ```
 
 Run the deployment script:
@@ -204,6 +205,48 @@ ssh -i .ssh/unifi-azure-vpn azureadmin@172.31.254.1
 
 TCP 22 is not allowed on the Azure public interface after deployment. Azure Run Command can provide temporary diagnostics without opening SSH. This project intentionally favors a disposable appliance: if VPN recovery fails completely, delete the resource group and redeploy instead of leaving a permanent public management port.
 
+## Monitoring and email alerts
+
+Optional Azure Monitor integration sends operational alerts through an email action group. Configure it only after the WireGuard tunnel and VPN-only SSH are working because the installer copies the health monitor to the VM through its WireGuard address.
+
+Run the collection setup with the same subscription and resource overrides used for deployment:
+
+```shell
+SUBSCRIPTION_ID="00000000-0000-0000-0000-000000000000" \
+ALERT_EMAIL="vpn-alerts@example.com" \
+./setup-alerting.sh
+```
+
+The script creates a Log Analytics workspace, email action group, Azure Monitor Agent, syslog data collection rule, Run Command activity alert, and a one-minute health timer on the VM. Azure sends a one-time verification message when an email receiver is added; alerts will not arrive until the recipient completes that verification.
+
+Syslog ingestion can take several minutes to start. After data appears, create the scheduled-query alerts:
+
+```shell
+SUBSCRIPTION_ID="00000000-0000-0000-0000-000000000000" \
+./setup-log-alerts.sh
+```
+
+If deployment values such as `RESOURCE_GROUP`, `RESOURCE_PREFIX`, `LOCATION`, `WG_SERVER_IP`, `ADMIN_USER`, or `SSH_KEY_PATH` were overridden, supply the same values to the monitoring scripts.
+
+| Alert | Trigger |
+|---|---|
+| WireGuard SSH login | `sshd` accepts a login, including a remote command |
+| WireGuard Run Command | Azure Run Command starts against the VM |
+| WireGuard disconnected | No peer handshake occurred within 180 seconds |
+| WireGuard source IP changed | The peer source IP changes because of WAN failover, CGNAT reassignment, or an ISP DHCP address change |
+| WireGuard server rebooted | The VM completes a reboot |
+
+The health monitor compares only the peer's source IP, not its translated UDP source port, so routine NAT port changes do not trigger failover alerts. It stores the first observed source IP as a baseline and alerts only on a subsequent change. Syslog sent to Log Analytics includes WireGuard connection state and handshake age, old and new peer public source IPs when they change, accepted SSH session details, and the VM boot ID and uptime when it starts. Treat that telemetry according to your privacy and retention requirements.
+
+To test the source-IP alert without disrupting the tunnel or replacing its real baseline, use temporary state files:
+
+```shell
+ssh -i .ssh/unifi-azure-vpn azureadmin@172.31.254.1 \
+   'printf "%s\n" TEST_BASELINE | sudo tee /tmp/wireguard-endpoint-test >/dev/null; sudo env ENDPOINT_STATE_FILE=/tmp/wireguard-endpoint-test STATE_FILE=/tmp/wireguard-state-test /usr/local/sbin/wireguard-health-monitor; sudo rm -f /tmp/wireguard-endpoint-test /tmp/wireguard-state-test'
+```
+
+Confirm that `WIREGUARD_ENDPOINT_CHANGED` appears in Log Analytics and that the action-group email arrives. Azure alert-rule activation and log ingestion can introduce a short delay, particularly immediately after initial setup. A real failover test remains the best end-to-end validation.
+
 ## Test and troubleshoot
 
 From a workstation on `LAN_CIDR`, ping `VM_PRIVATE_IP`. The first packet may be lost while the tunnel establishes.
@@ -232,7 +275,7 @@ Example pay-as-you-go pricing for West Europe in USD, checked in September 2026:
 | VNet, subnet, NIC, NSG | No base charge | $0.00 |
 | **Estimated fixed total** | | **$9.57/month** |
 
-Inbound transfer is free; outbound transfer may be billed. Prices vary by region, date, agreement, and currency. Check the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) before deployment.
+Inbound transfer is free; outbound transfer may be billed. The fixed estimate does not include optional Log Analytics ingestion, alert-rule evaluation, or notification charges. Prices vary by region, date, agreement, and currency. Check the [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/) before deployment.
 
 Deallocating the VM stops compute charges, but its disk and public IP continue billing. Delete the resource group when testing is complete.
 
