@@ -151,6 +151,10 @@ Keep `VNET_CIDR`, `SUBNET_CIDR`, `VM_PRIVATE_IP`, `WG_CIDR`, `WG_SERVER_IP`, and
 
 UI labels vary by UniFi Network version.
 
+The deployment generates `udm-wireguard.conf`, a pre-generated WireGuard profile containing the keys, tunnel addresses, Azure endpoint, and Azure routes needed for import. The steps below cover importing that profile and creating a basic UniFi policy route, but they cannot determine how every home network should be routed.
+
+You must understand and adapt the LAN-side routing for your environment, including which clients or VLANs may use the tunnel, firewall and isolation policies, return paths, and any overlapping private address ranges. Importing the profile establishes the tunnel; it does not automatically select all home-network traffic that should use it.
+
 1. Open **Settings > VPN > VPN Client**.
 2. Create a WireGuard VPN Client and import the generated `udm-wireguard.conf`.
 3. Name it **Azure WireGuard** and enable it. The client should become **Connected**.
